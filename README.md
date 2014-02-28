@@ -16,7 +16,7 @@ This library requires using cabal sandbox with the following sub-projects (mind 
 In order to run tests, you'll also need
 [network-transport-inmemory](https://github.com/haskell-distributed/network-transport-inmemory/tree/development)
 
-There is a `Makefile` in that would facilitate running the test suite, just do `make test`.
+There is a `Makefile` that would facilitate running the test suite, just do `make test`.
 
 # Documentation
 
@@ -25,9 +25,9 @@ Currently you can read the documentation by doing `cabal haddock` and accessing 
 # Example
 
 The API tries to replicate as much as it can from `System.Process`, there are bits that change
-specifically on the std_out, std_err, std_in, there is also a new filed called exit_code.
+specifically on the `std_out` and `std_err`. There is also a new `exit_code` field.
 
-You may send `ByteString`s to the process std_in by using the `sendToProcessStdIn` function.
+You may send `ByteString`s to the process `std_in` by using the `sendToProcessStdIn` function.
 
 An example to better explain how it works:
 
