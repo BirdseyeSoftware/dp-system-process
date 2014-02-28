@@ -2,6 +2,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
+import qualified Data.ByteString as BS
+
 import Control.Monad (forever, replicateM_)
 import Control.Monad.Trans (MonadIO(..))
 import Control.Concurrent (threadDelay)
@@ -9,7 +11,6 @@ import Control.Concurrent.MVar (MVar)
 import qualified Control.Concurrent.MVar as MVar
 import Data.Maybe (isJust)
 import Network.Transport.Chan (createTransport)
--- import Network.Transport.TCP (createTransport, defaultTCPParameters)
 import Control.Distributed.Process.Node (forkProcess, newLocalNode, initRemoteTable)
 import qualified Control.Distributed.Process as Process
 import System.Timeout (timeout)
@@ -22,9 +23,43 @@ import Control.Distributed.Process.SystemProcess
 main :: IO ()
 main = do
     transport <- createTransport
-    -- Right transport <- createTransport "127.0.0.1" "" defaultTCPParameters
     node <- newLocalNode transport initRemoteTable
     hspec $ do
+      describe "sending input to process" $ do
+        it "should work correctly" $ do
+              bufferVar <- MVar.newMVar []
+              resultVar <- MVar.newEmptyMVar
+              _ <- forkProcess node $ do
+
+                let procSpec = proc "cat" []
+
+                    handleStdOut (StdOut bs) = do
+                      liftIO $ MVar.modifyMVar_ bufferVar (return . (bs:))
+
+                    handleStdOut (StdErr bs) = do
+                      liftIO $ print bs
+
+                    handleExitCode (ExitCode code) =
+                      liftIO $ MVar.putMVar resultVar code
+
+                currentPid <- Process.getSelfPid
+                listenerPid <- Process.spawnLocal $ do
+                    replicateM_ 2 $
+                      Process.receiveWait [ Process.matchIf isExitCode handleExitCode
+                                          , Process.matchIf (not . isExitCode)
+                                                            handleStdOut ]
+                processPid <-
+                  startSystemProcess $ procSpec { std_err = sendToPid listenerPid
+                                                , std_out = sendToPid listenerPid
+                                                , exit_code = sendToPid listenerPid }
+
+                sendToProcessStdin processPid "hello"
+                liftIO $ threadDelay 1000
+                sendStdInEOF processPid
+
+              MVar.takeMVar resultVar >>= assertEqual "should have code 0" 0
+              MVar.takeMVar bufferVar >>= assertEqual "should echo input" ["hello"]
+
       describe "using shell constructor" $ do
         describe "system process that exists" $ do
 
