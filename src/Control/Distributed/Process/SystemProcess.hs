@@ -7,8 +7,8 @@ module Control.Distributed.Process.SystemProcess
        -- * Actor API
          runSystemProcess
        , startSystemProcess
-       , sendToProcessStdin
-       , sendStdInEOF
+       , writeStdin
+       , closeStdin
        , terminateProcess
 
        -- * ProcessSpec constructors
@@ -140,8 +140,8 @@ newtype StdinMessage
   = StdinMessage ByteString
   deriving (Show, Typeable, Binary)
 
-newtype StdInEOF
-  = StdInEOF ()
+newtype StdinEOF
+  = StdinEOF ()
   deriving (Show, Typeable, Binary)
 
 newtype TerminateMessage
@@ -163,32 +163,10 @@ ignoreSigPipe =
         | Errno ioe == ePIPE -> return ()
       _ -> C.throwIO e
 
+
+
 --------------------------------------------------------------------------------
 -- [Private] System Process functions
-
-shell :: String -> ProcessSpec
-shell cmd = ProcessSpec { cmdspec = ShellCommand cmd
-                        , cwd = Nothing
-                        , env = Nothing
-                        , std_out = ignore
-                        , std_err = ignore
-                        , exit_code = ignore
-                        , close_fds = False
-                        , create_group = False
-                        , delegate_ctlc = False }
-
-proc :: FilePath -> [String] -> ProcessSpec
-proc path args =
-  ProcessSpec { cmdspec = RawCommand path args
-              , cwd = Nothing
-              , env = Nothing
-              , std_out = ignore
-              , std_err = ignore
-              , exit_code = ignore
-              , close_fds = False
-              , create_group = False
-              , delegate_ctlc = False }
-
 shouldSendStream :: Transport -> Bool
 shouldSendStream Ignore = False
 shouldSendStream _ = True
@@ -218,6 +196,8 @@ createExitCodeStreamer
 createExitCodeStreamer processDone transport processHandle = do
   managerPid <- Process.getSelfPid
   exitCodeStreamer <- Process.spawnLocal $ do
+    -- NOTE: The usage of async is necessary here, for some
+    -- reason distributed-process crashes if there is a failure
     exitCodeAsync <- liftIO . async $ SProcess.waitForProcess processHandle
     exitCode <- liftIO $ waitCatch exitCodeAsync
     case exitCode of
@@ -242,7 +222,7 @@ handleStdIn st@(_, stdin, _) (StdinMessage bytes) = do
   MP.continue st
 
 handleStdInEOF :: State
-               -> StdInEOF
+               -> StdinEOF
                -> Process.Process (MP.ProcessAction State)
 handleStdInEOF st@(_, stdin, _) _ = do
   liftIO $ ignoreSigPipe $ hClose stdin
@@ -278,10 +258,34 @@ processDefinition =
 --------------------------------------------------------------------------------
 -- Public
 
+shell :: String -> ProcessSpec
+shell cmd = ProcessSpec { cmdspec = ShellCommand cmd
+                        , cwd = Nothing
+                        , env = Nothing
+                        , std_out = ignore
+                        , std_err = ignore
+                        , exit_code = ignore
+                        , close_fds = False
+                        , create_group = False
+                        , delegate_ctlc = False }
+
+proc :: FilePath -> [String] -> ProcessSpec
+proc path args =
+  ProcessSpec { cmdspec = RawCommand path args
+              , cwd = Nothing
+              , env = Nothing
+              , std_out = ignore
+              , std_err = ignore
+              , exit_code = ignore
+              , close_fds = False
+              , create_group = False
+              , delegate_ctlc = False }
 
 runSystemProcess :: ProcessSpec -> Process.Process ()
 runSystemProcess procSpec = do
     processDone <- liftIO MVar.newEmptyMVar
+    -- NOTE: The usage of async is necessary here, for some
+    -- reason distributed-process crashes if the exec name is invalid
     procAsync <- liftIO . async $ SProcess.createProcess sysProcessSpec
     result <- liftIO $ waitCatch procAsync
     case result of
@@ -312,11 +316,11 @@ runSystemProcess procSpec = do
 startSystemProcess :: ProcessSpec -> Process.Process Process.ProcessId
 startSystemProcess = Process.spawnLocal . runSystemProcess
 
-sendToProcessStdin :: Process.ProcessId -> ByteString -> Process.Process ()
-sendToProcessStdin pid = MP.cast pid . StdinMessage
+writeStdin :: Process.ProcessId -> ByteString -> Process.Process ()
+writeStdin pid = MP.cast pid . StdinMessage
 
-sendStdInEOF :: Process.ProcessId -> Process.Process ()
-sendStdInEOF pid = MP.cast pid $ StdInEOF ()
+closeStdin :: Process.ProcessId -> Process.Process ()
+closeStdin pid = MP.cast pid $ StdinEOF ()
 
 terminateProcess :: Process.ProcessId -> Process.Process ()
 terminateProcess pid = MP.call pid $ TerminateMessage ()

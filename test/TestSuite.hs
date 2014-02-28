@@ -53,9 +53,9 @@ main = do
                                                 , std_out = sendToPid listenerPid
                                                 , exit_code = sendToPid listenerPid }
 
-                sendToProcessStdin processPid "hello"
+                writeStdin processPid "hello"
                 liftIO $ threadDelay 1000
-                sendStdInEOF processPid
+                closeStdin processPid
 
               MVar.takeMVar resultVar >>= assertEqual "should have code 0" 0
               MVar.takeMVar bufferVar >>= assertEqual "should echo input" ["hello"]

@@ -27,7 +27,7 @@ Currently you can read the documentation by doing `cabal haddock` and accessing 
 The API tries to replicate as much as it can from `System.Process`, there are bits that change
 specifically on the `std_out` and `std_err`. There is also a new `exit_code` field.
 
-You may send `ByteString`s to the process `std_in` by using the `sendToProcessStdIn` function.
+You may send `ByteString`s to the process `std_in` by using the `writeStdin` function.
 
 An example to better explain how it works:
 
