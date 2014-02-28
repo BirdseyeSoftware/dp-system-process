@@ -3,13 +3,13 @@
 
 name:                dp-system-process
 version:             0.0.0.0
-synopsis:            System processes for Cloud Haskell
+synopsis:            Handle system processes in Cloud Haskell
 -- description:
-homepage:            https://github.com/HaskVan/dp-system-process
+homepage:            https://github.com/BirdseyeSoftware/dp-system-process
 license:             MIT
 license-file:        LICENSE
-author:              Roman Gonzalez
-maintainer:          romanandreg@gmail.com
+author:              Birdseye Software
+maintainer:          roman@birdseye-software.com
 -- copyright:
 category:            CloudHaskell, Network, System
 build-type:          Simple
@@ -33,8 +33,8 @@ library
     distributed-process,
     distributed-process-platform
 
-  ghc-options: -threaded
-  hs-source-dirs: src
+  ghc-options:         -threaded -Wall
+  hs-source-dirs:      src
   default-language:    Haskell2010
 
 test-suite dp-system-process-test
@@ -53,6 +53,6 @@ test-suite dp-system-process-test
     dp-system-process,
     hspec,
     HUnit
-  ghc-options: -threaded
-  hs-source-dirs: test
-  default-language:    Haskell2010
+  ghc-options:      -threaded -Wall
+  hs-source-dirs:   test
+  default-language: Haskell2010
