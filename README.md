@@ -1,4 +1,6 @@
-# WARNING! This is a work on progress, and it is still experimental, use it at your own risk
+WARNING! This is a work in progress, and it is still experimental, use it at your own risk
+
+# dp-system-process
 
 This library allows the creation of system processes using the distributed-process
 Actor's library.
