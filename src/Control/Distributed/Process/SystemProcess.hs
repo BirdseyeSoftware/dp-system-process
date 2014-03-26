@@ -30,6 +30,10 @@ module Control.Distributed.Process.SystemProcess
        , ProcessSpec(..)
        , ProcessStream(..)
        , Transport
+
+
+       , logMsg
+       , spawnLocalRevLink
        ) where
 
 import Control.Monad (void)
@@ -42,7 +46,7 @@ import GHC.Generics  (Generic)
 import Data.Conduit (awaitForever, ($$))
 import Data.Conduit.Binary (sourceHandle)
 
-import qualified Control.Concurrent.MVar as MVar
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, waitCatch)
 
 import Data.ByteString (hPutStr, ByteString)
@@ -51,6 +55,7 @@ import qualified Control.Distributed.Process                         as Process
 import qualified Control.Distributed.Process.Platform                as PP
 import qualified Control.Distributed.Process.Platform.ManagedProcess as MP
 import           Control.Distributed.Process.Platform.Time           (Delay(Infinity))
+import           Control.Distributed.Process.Management       (mxNotify, MxEvent(MxLog))
 
 import           System.Exit (ExitCode(..))
 import           System.IO (Handle, hClose)
@@ -116,7 +121,7 @@ sendToChan :: Process.SendPort ProcessStream -> Transport
 sendToChan = SendChan
 
 ignore :: Transport
-ignore = ignore
+ignore = Ignore
 
 --------------------
 
@@ -148,7 +153,12 @@ newtype TerminateMessage
   = TerminateMessage ()
   deriving (Show, Typeable, Binary)
 
-type State = (MVar.MVar Bool, Handle, SProcess.ProcessHandle)
+data State
+  = State {
+    _stateStdin       :: Handle
+  , _stateProcHandle  :: SProcess.ProcessHandle
+  , _stateProcessSpec :: ProcessSpec
+  }
 
 
 --------------------------------------------------------------------------------
@@ -167,6 +177,35 @@ ignoreSigPipe =
 
 --------------------------------------------------------------------------------
 -- [Private] System Process functions
+
+logMsg :: String -> Process.Process ()
+logMsg msg = do
+  self <- Process.getSelfPid
+  mxNotify . MxLog $ show self ++ ": " ++ msg
+
+cleanupProcess :: State -> Process.Process ()
+cleanupProcess (State _ procHandle procSpec) = do
+    liftIO (SProcess.getProcessExitCode procHandle) >>= cleanupProcess' retryCount
+  where
+    transport = exit_code procSpec
+    retryCount :: Int
+    retryCount = 15
+    delayTimeout :: Int
+    delayTimeout = 500111
+    gaveUpExitCode = (-99)
+
+    cleanupProcess' _ (Just exitCode) =
+      case exitCode of
+        ExitSuccess -> sendProcessStream transport $ ExitCode 0
+        ExitFailure n -> sendProcessStream transport $ ExitCode n
+    cleanupProcess' 0 _ = do
+      sendProcessStream transport $ ExitCode gaveUpExitCode
+    cleanupProcess' n Nothing = do
+      liftIO $ SProcess.terminateProcess procHandle
+      liftIO $ threadDelay delayTimeout
+      liftIO (SProcess.getProcessExitCode procHandle) >>=
+        cleanupProcess' (pred n)
+
 shouldSendStream :: Transport -> Bool
 shouldSendStream Ignore = False
 shouldSendStream _ = True
@@ -177,38 +216,49 @@ sendProcessStream (SendMessage pid) = Process.send pid
 sendProcessStream (SendChan chan)   = Process.sendChan chan
 sendProcessStream _ = const $ return ()
 
+spawnLocalRevLink :: String
+                      -> Process.Process ()
+                      -> Process.Process Process.ProcessId
+spawnLocalRevLink debugName action = do
+  selfPid <- Process.getSelfPid
+  Process.spawnLocal $ do
+    logMsg $ "Spawned " ++ debugName
+    Process.link selfPid
+    action
+
 createHandlerStreamer
   :: Transport
   -> (ByteString -> ProcessStream)
   -> Handle
   -> Process.Process ()
-createHandlerStreamer transport streamCtor handle =
+createHandlerStreamer transport streamCtor handle = do
+    logMsg $ "create transport for handle "
+         ++ show handle ++ " with transport " ++ show transport
     if shouldSendStream transport
-      then void $ Process.spawnLocal handleStreamer >>= Process.link
-      else liftIO $ hClose handle
+      then void $
+             spawnLocalRevLink ("handleStreamer " ++ show handle) handleStreamer
+      else do
+        logMsg "not using handler, ignoring it."
+        sourceHandle handle $$ awaitForever (const $ return ())
   where
     handleStreamer =
       sourceHandle handle $$
         awaitForever (lift . sendProcessStream transport . streamCtor)
 
-createExitCodeStreamer
-  :: MVar.MVar Bool -> Transport -> SProcess.ProcessHandle -> Process.Process ()
-createExitCodeStreamer processDone transport processHandle = do
+createExitCodeWatcher
+  :: SProcess.ProcessHandle
+  -> Process.Process Process.ProcessId
+createExitCodeWatcher processHandle = do
   managerPid <- Process.getSelfPid
-  exitCodeStreamer <- Process.spawnLocal $ do
+  spawnLocalRevLink "exitCodeWatcher" $ do
+
     -- NOTE: The usage of async is necessary here, for some
     -- reason distributed-process crashes if there is a failure
-    exitCodeAsync <- liftIO . async $ SProcess.waitForProcess processHandle
-    exitCode <- liftIO $ waitCatch exitCodeAsync
-    case exitCode of
-      Right ExitSuccess -> sendProcessStream transport $ ExitCode 0
-      Right (ExitFailure n) -> sendProcessStream transport $ ExitCode n
-      Left err -> do
-        liftIO $ print err
-        sendProcessStream transport $ ExitCode 127
-    void $ liftIO $ MVar.tryPutMVar processDone True
+    exitCode <- liftIO
+                  $ async (SProcess.waitForProcess processHandle) >>= waitCatch
+    logMsg $ "child process has exited with exitCode: " ++ show exitCode
+    logMsg "calling shutdown on managerPid"
     MP.shutdown managerPid
-  Process.link exitCodeStreamer
 
 
 --------------------------------------------------------------------------------
@@ -217,32 +267,27 @@ createExitCodeStreamer processDone transport processHandle = do
 handleStdIn :: State
             -> StdinMessage
             -> Process.Process (MP.ProcessAction State)
-handleStdIn st@(_, stdin, _) (StdinMessage bytes) = do
+handleStdIn st@(State stdin _ _) (StdinMessage bytes) = do
   liftIO $ ignoreSigPipe $ hPutStr stdin bytes
   MP.continue st
 
 handleStdInEOF :: State
                -> StdinEOF
                -> Process.Process (MP.ProcessAction State)
-handleStdInEOF st@(_, stdin, _) _ = do
+handleStdInEOF st@(State stdin _ _) _ = do
   liftIO $ ignoreSigPipe $ hClose stdin
   MP.continue st
 
 handleTermination :: State
                   -> TerminateMessage
                   -> Process.Process (MP.ProcessReply () State)
-handleTermination st@(processDone, _, procHandler) _ = do
-  liftIO $ SProcess.terminateProcess procHandler
-  void $ liftIO $ MVar.tryPutMVar processDone True
+handleTermination st _ = do
   _ <- MP.stopWith st PP.ExitNormal
   MP.reply () st
 
 handleShutdown :: State -> PP.ExitReason -> Process.Process ()
-handleShutdown (processDone, _, procHandler) _ = do
-  result <- liftIO $ MVar.tryTakeMVar processDone
-  case result of
-    Just _ -> return ()
-    Nothing -> liftIO $ SProcess.terminateProcess procHandler
+handleShutdown st _ = do
+  cleanupProcess st
 
 processDefinition :: MP.ProcessDefinition State
 processDefinition =
@@ -259,15 +304,16 @@ processDefinition =
 -- Public
 
 shell :: String -> ProcessSpec
-shell cmd = ProcessSpec { cmdspec = ShellCommand cmd
-                        , cwd = Nothing
-                        , env = Nothing
-                        , std_out = ignore
-                        , std_err = ignore
-                        , exit_code = ignore
-                        , close_fds = False
-                        , create_group = False
-                        , delegate_ctlc = False }
+shell cmd =
+  ProcessSpec { cmdspec = ShellCommand cmd
+              , cwd = Nothing
+              , env = Nothing
+              , std_out = ignore
+              , std_err = ignore
+              , exit_code = ignore
+              , close_fds = False
+              , create_group = False
+              , delegate_ctlc = False }
 
 proc :: FilePath -> [String] -> ProcessSpec
 proc path args =
@@ -283,21 +329,27 @@ proc path args =
 
 runSystemProcess :: ProcessSpec -> Process.Process ()
 runSystemProcess procSpec = do
-    processDone <- liftIO MVar.newEmptyMVar
     -- NOTE: The usage of async is necessary here, for some
     -- reason distributed-process crashes if the exec name is invalid
     procAsync <- liftIO . async $ SProcess.createProcess sysProcessSpec
     result <- liftIO $ waitCatch procAsync
     case result of
-      Right (Just stdin, Just stdout, Just stderr, procHandler) -> do
-        createExitCodeStreamer processDone (exit_code procSpec) procHandler
-        createHandlerStreamer  (std_out procSpec) StdOut stdout
-        createHandlerStreamer  (std_err procSpec) StdErr stderr
-        MP.serve (processDone, stdin, procHandler) start processDefinition
-      _ ->
+      Right (Just stdin, Just stdout, Just stderr, procHandle) -> do
+        logMsg "systemProcess manager starting"
+        let st = State stdin procHandle procSpec
+        Process.finally
+          (do void $ createExitCodeWatcher procHandle
+              createHandlerStreamer (std_out procSpec) StdOut stdout
+              createHandlerStreamer (std_err procSpec) StdErr stderr
+              MP.serve st start processDefinition)
+          (cleanupProcess st)
+      _ -> do
+        logMsg "systemProcess failed to start"
         sendProcessStream (exit_code procSpec) (ExitCode 127)
   where
-    start = return . flip MP.InitOk Infinity
+    start st = do
+      logMsg "systemProcess manager running managed process"
+      return $ MP.InitOk st Infinity
     sysCmdspec = case cmdspec procSpec of
       RawCommand path args -> SProcess.RawCommand path args
       ShellCommand str -> SProcess.ShellCommand str
