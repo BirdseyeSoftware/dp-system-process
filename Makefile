@@ -2,10 +2,10 @@
 	[[ -d vendor ]] || mkdir vendor
 
 	[[ -d vendor/distributed-process ]] || \
-	{ cd vendor; git clone -b development https://github.com/haskell-distributed/distributed-process; }
+	{ cd vendor; git clone -b be https://github.com/BirdseyeSoftware/distributed-process; }
 
 	[[ -d vendor/distributed-process-platform ]] || \
-	{ cd vendor; git clone -b development https://github.com/haskell-distributed/distributed-process-platform; }
+	{ cd vendor; git clone -b be https://github.com/BirdseyeSoftware/distributed-process-platform; }
 
 	[[ -d vendor/network-transport ]] || \
 	{ cd vendor; git clone -b development https://github.com/haskell-distributed/network-transport; }
