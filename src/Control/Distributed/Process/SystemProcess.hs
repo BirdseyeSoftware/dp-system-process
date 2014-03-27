@@ -1,13 +1,14 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric      #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
 module Control.Distributed.Process.SystemProcess
        (
        -- * Actor API
          runSystemProcess
        , startSystemProcess
        , writeStdin
+       , writeStdinAsync
        , closeStdin
        , terminateProcess
 
@@ -36,36 +37,38 @@ module Control.Distributed.Process.SystemProcess
        , spawnLocalRevLink
        ) where
 
-import Control.Monad (void)
+import Control.Monad       (void)
 import Control.Monad.Trans (lift, liftIO)
 
 import Data.Binary   (Binary)
 import Data.Typeable (Typeable)
 import GHC.Generics  (Generic)
 
-import Data.Conduit (awaitForever, ($$))
+import Data.Conduit        (awaitForever, ($$))
 import Data.Conduit.Binary (sourceHandle)
 
-import Control.Concurrent (threadDelay)
+import Control.Concurrent       (threadDelay)
 import Control.Concurrent.Async (async, waitCatch)
 
-import Data.ByteString (hPutStr, ByteString)
+import Data.ByteString (ByteString, hPutStr)
 
 import qualified Control.Distributed.Process                         as Process
+import           Control.Distributed.Process.Management              (MxEvent (MxLog),
+                                                                      mxNotify)
 import qualified Control.Distributed.Process.Platform                as PP
 import qualified Control.Distributed.Process.Platform.ManagedProcess as MP
-import           Control.Distributed.Process.Platform.Time           (Delay(Infinity))
-import           Control.Distributed.Process.Management       (mxNotify, MxEvent(MxLog))
+import           Control.Distributed.Process.Platform.Time           (Delay (Infinity))
 
-import           System.Exit (ExitCode(..))
-import           System.IO (Handle, hClose)
+import           System.Exit    (ExitCode (..))
+import           System.IO      (BufferMode (LineBuffering), Handle, hClose,
+                                 hSetBuffering)
 import qualified System.Process as SProcess
 
 --------------------
 
 import qualified Control.Exception as C
-import GHC.IO.Exception (IOErrorType(..), IOException(..))
-import Foreign.C.Error (Errno(..), ePIPE)
+import           Foreign.C.Error   (Errno (..), ePIPE)
+import           GHC.IO.Exception  (IOErrorType (..), IOException (..))
 
 
 --------------------------------------------------------------------------------
@@ -264,12 +267,22 @@ createExitCodeWatcher processHandle = do
 --------------------------------------------------------------------------------
 -- [Private] Managed Process handlers
 
-handleStdIn :: State
+handleStdInCast :: State
             -> StdinMessage
             -> Process.Process (MP.ProcessAction State)
-handleStdIn st@(State stdin _ _) (StdinMessage bytes) = do
+handleStdInCast st@(State stdin _ _) (StdinMessage bytes) = do
   liftIO $ ignoreSigPipe $ hPutStr stdin bytes
+  logMsg $ "getting input for sys process: " ++ show bytes
   MP.continue st
+
+handleStdInCall :: State
+            -> StdinMessage
+            -> Process.Process (MP.ProcessReply () State)
+handleStdInCall st@(State stdin _ _) (StdinMessage bytes) = do
+  liftIO $ ignoreSigPipe $ hPutStr stdin bytes
+  logMsg $ "getting input for sys process: " ++ show bytes
+  MP.reply () st
+
 
 handleStdInEOF :: State
                -> StdinEOF
@@ -282,18 +295,20 @@ handleTermination :: State
                   -> TerminateMessage
                   -> Process.Process (MP.ProcessReply () State)
 handleTermination st _ = do
-  _ <- MP.stopWith st PP.ExitNormal
-  MP.reply () st
+  logMsg "terminateProcess called"
+  MP.stopWith st PP.ExitNormal >>= MP.replyWith ()
 
 handleShutdown :: State -> PP.ExitReason -> Process.Process ()
 handleShutdown st _ = do
+  logMsg "shutdown called"
   cleanupProcess st
 
 processDefinition :: MP.ProcessDefinition State
 processDefinition =
   MP.defaultProcess  {
     MP.apiHandlers = [
-      MP.handleCast handleStdIn
+      MP.handleCast handleStdInCast
+    , MP.handleCall handleStdInCall
     , MP.handleCast handleStdInEOF
     , MP.handleCall handleTermination
     ]
@@ -336,6 +351,7 @@ runSystemProcess procSpec = do
     case result of
       Right (Just stdin, Just stdout, Just stderr, procHandle) -> do
         logMsg "systemProcess manager starting"
+        liftIO $ hSetBuffering stdin LineBuffering
         let st = State stdin procHandle procSpec
         Process.finally
           (do void $ createExitCodeWatcher procHandle
@@ -368,8 +384,11 @@ runSystemProcess procSpec = do
 startSystemProcess :: ProcessSpec -> Process.Process Process.ProcessId
 startSystemProcess = Process.spawnLocal . runSystemProcess
 
+writeStdinAsync :: Process.ProcessId -> ByteString -> Process.Process ()
+writeStdinAsync pid = MP.cast pid . StdinMessage
+
 writeStdin :: Process.ProcessId -> ByteString -> Process.Process ()
-writeStdin pid = MP.cast pid . StdinMessage
+writeStdin pid = MP.call pid . StdinMessage
 
 closeStdin :: Process.ProcessId -> Process.Process ()
 closeStdin pid = MP.cast pid $ StdinEOF ()
